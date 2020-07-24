@@ -1,0 +1,19 @@
+{
+  "logger": {
+    "title": "Remote Sync"
+  },
+  "uploadOnSave": false,
+  "useAtomicWrites": false,
+  "deleteLocal": false,
+  "hostname": "10.10.0.100",
+  "port": "22",
+  "target": "/home/barrel/magic_cookie/",
+  "ignore": [
+    ".remote-sync.json",
+    ".git/**"
+  ],
+  "username": "barrel",
+  "password": "arquivo",
+  "watch": [],
+  "transport": "scp"
+}
