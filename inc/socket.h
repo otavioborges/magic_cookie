@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include <netinet/in.h>
 
-typedef int (*socket_callback)(uint8_t *, int, uint8_t *);
+typedef int (*socket_callback)(uint8_t *, int, uint8_t **);
 
 int socket_openServer(uint16_t port);
 int socket_closeServer(void);

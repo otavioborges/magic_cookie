@@ -162,7 +162,7 @@ int db_searchStaticLease(struct dhcp_lease *result, uint8_t *hwAddr){
 
 	if(PQntuples(res) == 0)
 		return DB_RESULTS_NONE;
-	
+
 	result->ipAddr.s_addr = ntohl(*((uint32_t *)PQgetvalue(res, 0, DHCP_FIXED_COL_IP)));
 	db_DBToHwAddr((uint64_t *)PQgetvalue(res, 0, DHCP_FIXED_COL_HW), result->hwAddr);
 	result->hostname[0] = '\0';
@@ -258,6 +258,47 @@ int db_removeStaticLease(uint8_t *hwAddr){
 	}
 
 	return DB_RESULTS_REMOVED;
+}
+
+int db_containsLease(struct in_addr ip, struct dhcp_lease *list, int count){
+	int idx;
+
+	for(idx = 0; idx < count; idx++){
+		if(ip.s_addr == list[idx].ipAddr.s_addr)
+			return DB_RESULTS_FOUND;
+	}
+
+	return DB_RESULTS_NONE;
+}
+
+int db_searchByIP(struct dhcp_lease *result, struct in_addr ip){
+	int ret;
+	char query[128];
+
+	ret = db_connectDB(NULL);
+	if(ret){
+		DEBUG("Error while trying to get the leases");
+		return ret;
+	}
+
+	sprintf(query, "SELECT * FROM dhcp_releases WHERE ip_addr=%u;", ip.s_addr);
+	PGresult *res = PQexecParams(m_conn, query, 0, NULL, NULL, NULL, NULL, 1);
+	if(PQresultStatus(res) != PGRES_TUPLES_OK){
+		DEBUG("No leases matching found");
+		return DB_RESULTS_NONE;
+	}
+
+	if(PQntuples(res) == 0)
+		return DB_RESULTS_NONE;
+
+	result->ipAddr.s_addr = ntohl(*((uint32_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_IP)));
+	db_DBToHwAddr((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HW), result->hwAddr);
+	strcpy(result->hostname, (char *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HOSTNAME));
+	result->leaseTimestamp = ntohll(*((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_TIME)));
+
+	PQclear(res);
+	db_closeDB();
+	return DB_RESULTS_FOUND;
 }
 
 static uint64_t db_hwAddrToDB(uint8_t *hwAddr){

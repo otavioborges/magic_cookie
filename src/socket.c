@@ -24,9 +24,10 @@ static uint8_t m_keepRunning = 1;
 static void *socket_handler(void *argument){
 	uint8_t *keep = (uint8_t *)argument;
 	struct sockaddr_in clientAddr;
+	struct sockaddr_ll destAddr;
 	int addrLength, responseLength, recvBytes, sendBytes;
 	uint8_t *response;
-	
+
 	addrLength = sizeof(clientAddr);
 	while(*keep){
 		DEBUG("Trying to receive...");
@@ -34,13 +35,17 @@ static void *socket_handler(void *argument){
 		if(recvBytes > 0){
 			DEBUG("Received %d bytes", recvBytes);
 			if(m_callback){
-			       responseLength = m_callback(payload, recvBytes, response);
-		       		if(responseLength > 0){	       
-					memset(&clientAddr, 0, sizeof(clientAddr));
-					clientAddr.sin_family = AF_INET;
-					clientAddr.sin_port = htons(68);
-					clientAddr.sin_addr.s_addr = INADDR_BROADCAST;
-					bzero(&clientAddr.sin_zero, sizeof(clientAddr.sin_zero));
+       responseLength = m_callback(payload, recvBytes, &response);
+     		if(responseLength > 0){
+					// memset(&clientAddr, 0, sizeof(clientAddr));
+					// clientAddr.sin_family = AF_INET;
+					// clientAddr.sin_port = htons(68);
+					// clientAddr.sin_addr.s_addr = INADDR_BROADCAST;
+					// bzero(&clientAddr.sin_zero, sizeof(clientAddr.sin_zero));
+
+					memset(&destAddr, 0, sizeof(destAddr));
+					destAddr.sll_family = PF_PACKET;
+					destAddr.sll_protocol =
 
 					sendBytes = sendto(m_socket, response, responseLength, MSG_DONTWAIT, (struct sockaddr *)&clientAddr, addrLength);
 					DEBUG("Sent %d bytes to client...", sendBytes);
@@ -143,4 +148,3 @@ int socket_setRecvTimeout(unsigned int ms){
 void socket_defineCallback(socket_callback func){
 	m_callback = func;
 }
-

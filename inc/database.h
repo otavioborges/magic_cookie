@@ -21,4 +21,7 @@ int db_addStaticLease(struct dhcp_lease lease);
 int db_removeLease(uint8_t *hwAddr);
 int db_removeStaticLease(uint8_t *hwAddr);
 
+int db_containsLease(struct in_addr ip, struct dhcp_lease *list, int count);
+int db_searchByIP(struct dhcp_lease *result, struct in_addr ip);
+
 #endif // _INC_DATABASE_H_
