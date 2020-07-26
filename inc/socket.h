@@ -8,7 +8,9 @@
 #include <stdint.h>
 #include <netinet/in.h>
 
-typedef int (*socket_callback)(uint8_t *, int, uint8_t **);
+#include <net/if_arp.h>
+
+typedef int (*socket_callback)(uint8_t *, int, uint8_t **, struct arpreq *);
 
 int socket_openServer(uint16_t port);
 int socket_closeServer(void);

@@ -19,8 +19,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <arpa/inet.h>
 
 #include <libpq-fe.h>
+
+#include <sys/time.h>
 
 #include "config.h"
 #include "database.h"
@@ -53,7 +56,7 @@ struct dhcp_lease *db_getLeases(int *count){
 	if(ret){
 		*count = -1;
 
-		DEBUG("Error while trying to get the static leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to database, error: %d", __func__, ret);
 		return NULL;
 	}
 
@@ -61,10 +64,11 @@ struct dhcp_lease *db_getLeases(int *count){
 	if(PQresultStatus(res) != PGRES_TUPLES_OK){
 		*count = 0;
 
-		DEBUG("No fixed releases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error getting leases from DB", __func__);
 		return NULL;
 	}
 
+	config_log(CONFIG_LOG_DEBUG, "Found %d DHCP leases", PQntuples(res));
 	results = (struct dhcp_lease *)malloc((sizeof(struct dhcp_lease) * PQntuples(res)));
 	*count = PQntuples(res);
 	for(idx = 0; idx < (*count); idx++){
@@ -87,7 +91,7 @@ struct dhcp_lease *db_getStaticLeases(int *count){
 	if(ret){
 		*count = -1;
 
-		DEBUG("Error while trying to get the static leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to database, error: %d", __func__, ret);
 		return NULL;
 	}
 
@@ -95,10 +99,11 @@ struct dhcp_lease *db_getStaticLeases(int *count){
 	if(PQresultStatus(res) != PGRES_TUPLES_OK){
 		*count = 0;
 
-		DEBUG("No fixed releases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error getting fixed leases", __func__);
 		return NULL;
 	}
 
+	config_log(CONFIG_LOG_DEBUG, "Got %d fixed leases", ret);
 	results = (struct dhcp_lease *)malloc((sizeof(struct dhcp_lease) * PQntuples(res)));
 	*count = PQntuples(res);
 	for(idx = 0; idx < (*count); idx++){
@@ -119,14 +124,14 @@ int db_searchLease(struct dhcp_lease *result, uint8_t *hwAddr){
 
 	ret = db_connectDB(NULL);
 	if(ret){
-		DEBUG("Error while trying to get the leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error searching for leases, error: %d", __func__, ret);
 		return ret;
 	}
 
 	sprintf(query, "SELECT * FROM dhcp_releases WHERE hw_addr=%llu;", db_hwAddrToDB(hwAddr));
 	PGresult *res = PQexecParams(m_conn, query, 0, NULL, NULL, NULL, NULL, 1);
 	if(PQresultStatus(res) != PGRES_TUPLES_OK){
-		DEBUG("No leases matching found");
+		config_log(CONFIG_LOG_WARNING, "%s - Error searching for leases", __func__);
 		return DB_RESULTS_NONE;
 	}
 
@@ -138,6 +143,7 @@ int db_searchLease(struct dhcp_lease *result, uint8_t *hwAddr){
 	strcpy(result->hostname, (char *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HOSTNAME));
 	result->leaseTimestamp = ntohll(*((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_TIME)));
 
+	config_log(CONFIG_LOG_DEBUG, "Found lease for %s with IP %s", dhcp_htoa(result->hwAddr), inet_ntoa(result->ipAddr));
 	PQclear(res);
 	db_closeDB();
 	return DB_RESULTS_FOUND;
@@ -149,14 +155,14 @@ int db_searchStaticLease(struct dhcp_lease *result, uint8_t *hwAddr){
 
 	ret = db_connectDB(NULL);
 	if(ret){
-		DEBUG("Error while trying to get the leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
 		return ret;
 	}
 
 	sprintf(query, "SELECT * FROM dhcp_fixed WHERE hw_addr=%llu;", db_hwAddrToDB(hwAddr));
 	PGresult *res = PQexecParams(m_conn, query, 0, NULL, NULL, NULL, NULL, 1);
 	if(PQresultStatus(res) != PGRES_TUPLES_OK){
-		DEBUG("No leases matching found");
+		config_log(CONFIG_LOG_WARNING, "%s - Error searching static lease", __func__);
 		return DB_RESULTS_NONE;
 	}
 
@@ -168,32 +174,38 @@ int db_searchStaticLease(struct dhcp_lease *result, uint8_t *hwAddr){
 	result->hostname[0] = '\0';
 	result->leaseTimestamp = 0;
 
+	config_log(CONFIG_LOG_DEBUG, "Found a static lease for %s with IP %s", dhcp_htoa(result->hwAddr), inet_ntoa(result->ipAddr));
 	PQclear(res);
 	db_closeDB();
 	return DB_RESULTS_FOUND;
 }
 
-int db_addLease(struct dhcp_lease lease){
+int db_addLease(struct dhcp_lease *lease){
 	int ret;
 	char query[128];
+	struct timeval leaseTime;
 
 	ret = db_connectDB(NULL);
 	if(ret){
-		DEBUG("Error while trying to get the leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
 		return ret;
 	}
 
-	sprintf(query, "INSERT INTO dhcp_releases(ip_addr, hostname, status, hw_addr, lease_time) VALUES (%u, '%s', true, %llu, 0)",
-		lease.ipAddr.s_addr,
-		lease.hostname,
-		db_hwAddrToDB(lease.hwAddr));
+	gettimeofday(&leaseTime, NULL);
+	lease->leaseTimestamp = leaseTime.tv_sec;
+	sprintf(query, "INSERT INTO dhcp_releases(ip_addr, hostname, status, hw_addr, lease_time) VALUES (%u, '%s', true, %llu, %u)",
+		lease->ipAddr.s_addr,
+		lease->hostname,
+		db_hwAddrToDB(lease->hwAddr),
+		lease->leaseTimestamp);
 
 	PGresult *res = PQexec(m_conn, query);
 	if(PQresultStatus(res) != PGRES_COMMAND_OK){
-		DEBUG("Leases already exists");
+		config_log(CONFIG_LOG_DEBUG, "Lease %d already exists", inet_ntoa(lease->ipAddr));
 		return DB_RESULTS_EXISTS;
 	}
 
+	config_log(CONFIG_LOG_DEBUG, "New lease for %s added", inet_ntoa(lease->ipAddr));
 	return DB_RESULTS_ADDED;
 }
 
@@ -203,7 +215,7 @@ int db_addStaticLease(struct dhcp_lease lease){
 
 	ret = db_connectDB(NULL);
 	if(ret){
-		DEBUG("Error while trying to get the leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
 		return ret;
 	}
 
@@ -213,10 +225,11 @@ int db_addStaticLease(struct dhcp_lease lease){
 
 	PGresult *res = PQexec(m_conn, query);
 	if(PQresultStatus(res) != PGRES_COMMAND_OK){
-		DEBUG("Fixed leases already exists");
+		config_log(CONFIG_LOG_DEBUG, "Static lease for %s already exists", dhcp_htoa(lease.hwAddr));
 		return DB_RESULTS_EXISTS;
 	}
 
+	config_log(CONFIG_LOG_DEBUG, "Added static lease for %s with IP %s", dhcp_htoa(lease.hwAddr), inet_ntoa(lease.ipAddr));
 	return DB_RESULTS_ADDED;
 }
 
@@ -226,17 +239,18 @@ int db_removeLease(uint8_t *hwAddr){
 
 	ret = db_connectDB(NULL);
 	if(ret){
-		DEBUG("Error while trying to get the leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
 		return ret;
 	}
 
 	sprintf(query, "DELETE FROM dhcp_releases WHERE hw_addr=%llu", db_hwAddrToDB(hwAddr));
 	PGresult *res = PQexec(m_conn, query);
 	if(PQresultStatus(res) != PGRES_COMMAND_OK){
-		DEBUG("Fixed leases already exists");
+		config_log(CONFIG_LOG_DEBUG, "%s - Error removing lease for %s", __func__, dhcp_htoa(hwAddr));
 		return DB_RESULTS_NONE;
 	}
 
+	config_log(CONFIG_LOG_DEBUG, "Removed lease for %s", dhcp_htoa(hwAddr));
 	return DB_RESULTS_REMOVED;
 }
 
@@ -246,17 +260,18 @@ int db_removeStaticLease(uint8_t *hwAddr){
 
 	ret = db_connectDB(NULL);
 	if(ret){
-		DEBUG("Error while trying to get the leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
 		return ret;
 	}
 
 	sprintf(query, "DELETE FROM dhcp_fixed WHERE hw_addr=%llu", db_hwAddrToDB(hwAddr));
 	PGresult *res = PQexec(m_conn, query);
 	if(PQresultStatus(res) != PGRES_COMMAND_OK){
-		DEBUG("Fixed leases already exists");
+		config_log(CONFIG_LOG_DEBUG, "%s - Error static lease for %s", __func__, dhcp_htoa(hwAddr));
 		return DB_RESULTS_NONE;
 	}
 
+	config_log(CONFIG_LOG_DEBUG, "Static lease removed for %s", dhcp_htoa(hwAddr));
 	return DB_RESULTS_REMOVED;
 }
 
@@ -264,8 +279,10 @@ int db_containsLease(struct in_addr ip, struct dhcp_lease *list, int count){
 	int idx;
 
 	for(idx = 0; idx < count; idx++){
-		if(ip.s_addr == list[idx].ipAddr.s_addr)
+		if(ip.s_addr == list[idx].ipAddr.s_addr){
+			config_log(CONFIG_LOG_DEBUG, "Lease with IP %s found on list", inet_ntoa(ip));
 			return DB_RESULTS_FOUND;
+		}
 	}
 
 	return DB_RESULTS_NONE;
@@ -277,14 +294,14 @@ int db_searchByIP(struct dhcp_lease *result, struct in_addr ip){
 
 	ret = db_connectDB(NULL);
 	if(ret){
-		DEBUG("Error while trying to get the leases");
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
 		return ret;
 	}
 
 	sprintf(query, "SELECT * FROM dhcp_releases WHERE ip_addr=%u;", ip.s_addr);
 	PGresult *res = PQexecParams(m_conn, query, 0, NULL, NULL, NULL, NULL, 1);
 	if(PQresultStatus(res) != PGRES_TUPLES_OK){
-		DEBUG("No leases matching found");
+		config_log(CONFIG_LOG_DEBUG, "No leases with IP %s", inet_ntoa(ip));
 		return DB_RESULTS_NONE;
 	}
 
@@ -296,9 +313,59 @@ int db_searchByIP(struct dhcp_lease *result, struct in_addr ip){
 	strcpy(result->hostname, (char *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HOSTNAME));
 	result->leaseTimestamp = ntohll(*((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_TIME)));
 
+	config_log(CONFIG_LOG_DEBUG, "Found a lease for %s with IP %s", dhcp_htoa(result->hwAddr), inet_ntoa(result->ipAddr));
 	PQclear(res);
 	db_closeDB();
 	return DB_RESULTS_FOUND;
+}
+
+int db_updateLeaseTime(uint8_t *hw){
+	int ret;
+	char query[128];
+	struct timeval leaseTime;
+
+	ret = db_connectDB(NULL);
+	if(ret){
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
+		return ret;
+	}
+
+	gettimeofday(&leaseTime, NULL);
+	sprintf(query, "UPDATE dhcp_releases SET lease_time=%u WHERE hw_addr=%llu;",
+		leaseTime.tv_sec,
+		db_hwAddrToDB(hw));
+
+	PGresult *res = PQexec(m_conn, query);
+	if(PQresultStatus(res) == PGRES_COMMAND_OK){
+		config_log(CONFIG_LOG_DEBUG, "Lease %s updated", dhcp_htoa(hw));
+		return DB_RESULTS_FOUND;
+	}else{
+		return DB_RESULTS_NONE;
+	}
+}
+
+int db_deleteOlderThan(uint32_t seconds){
+	int ret;
+	char query[128];
+	struct timeval leaseTime;
+
+	ret = db_connectDB(NULL);
+	if(ret){
+		config_log(CONFIG_LOG_WARNING, "%s - Error connecting to DB, error: %d", __func__, ret);
+		return ret;
+	}
+
+	gettimeofday(&leaseTime, NULL);
+	sprintf(query, "DELETE FROM dhcp_releases WHERE lease_time<=%u;",
+		(leaseTime.tv_sec - seconds));
+
+	PGresult *res = PQexec(m_conn, query);
+	if(PQresultStatus(res) == PGRES_COMMAND_OK){
+		config_log(CONFIG_LOG_DEBUG, "Old leases remove");
+		return DB_RESULTS_FOUND;
+	}else{
+		return DB_RESULTS_NONE;
+	}
 }
 
 static uint64_t db_hwAddrToDB(uint8_t *hwAddr){
@@ -334,10 +401,9 @@ static int db_connectDB(char *connectString){
 		connectString = (char *)DEFAULT_CONN_STR;
 
 	pthread_mutex_lock(&m_mutex_conn);
-	DEBUG("Connecting to DB using string: %s", connectString);
+	config_log(CONFIG_LOG_DEBUG, "Connecting with string %s", connectString);
 	m_conn = PQconnectdb(connectString);
 	if(PQstatus(m_conn) == CONNECTION_BAD){
-		DEBUG("Error connecting to DB, message: %s", PQerrorMessage(m_conn));
 		return -EACCES;
 	}
 

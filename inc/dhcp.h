@@ -19,6 +19,7 @@
 #define DHCP_OPTION_SWAP_SERVER			16U
 #define DHCP_OPTION_ROOT_PATH				17U
 #define DHCP_OPTION_EXT_PATH				18U
+#define DHCP_OPTION_DEFAULT_TTL			23U
 #define DHCP_OPTION_INTERFACE_MTU		26U
 #define DHCP_OPTION_BROADCAST_ADDR	28U
 #define DHCP_OPTION_STATIC_ROUTE		33U
@@ -31,6 +32,8 @@
 #define DHCP_OPTION_SERVER_ID				54U
 #define DHCP_OPTION_PARAMS					55U
 #define DHCP_OPTION_MAX_SIZE				57U
+#define DHCP_OPTION_RENEWAL					58U
+#define DHCP_OPTION_REBINDING				59U
 #define DHCP_OPTION_CLIENT_ID				61U
 #define DHCP_OPTION_DOMAIN_SEARCH		119U
 #define DHCP_OPTION_CLASSNET_STATIC	121u
@@ -40,6 +43,8 @@
 
 #include <netinet/in.h>
 #include <stdint.h>
+
+#include "socket.h"
 
 struct dhcp_lease{
 	struct in_addr ipAddr;
@@ -73,9 +78,28 @@ struct dhcp_packet{
 	uint8_t options[256];
 };
 
-int dhcp_socketCallback(uint8_t *payload, int length, uint8_t **response);
+struct dhcp_server_config{
+	char *interface;
+	struct in_addr serverIP;
+	struct in_addr netmask;
+	struct in_addr subnet;
+	struct in_addr *routers;
+	struct in_addr *dns;
+	char *domainName;
+	uint32_t initialRange;
+	uint32_t endRange;
+
+	int32_t timezone; // offset in seconds from GMT
+	uint16_t mtu;
+
+	uint32_t leaseTime;
+	uint32_t bindindTime;
+};
+
+int dhcp_socketCallback(uint8_t *payload, int length, uint8_t **response, struct arpreq *client);
 int dhcp_macMatch(uint8_t *a, uint8_t *b);
-int dhcp_init(void);
+int dhcp_init(char *configFile);
 int dhcp_end(void);
+char *dhcp_htoa(uint8_t *hwAddr);
 
 #endif // _INC_DHCP_H_

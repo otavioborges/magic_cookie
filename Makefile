@@ -2,7 +2,8 @@
 .PHONY: clean
 
 LD_FLAGS=-lpthread -lpq
-	CFLAGS=-g3 -c -Iinc -I/usr/include/postgresql/ -DDEBUG_MSG
+CFLAGS=-g3 -c -Iinc -I/usr/include/postgresql/
+#-DDEBUG_MSG
 SRC_DIR=src
 BUILD_DIR=build
 C_FILES=$(wildcard $(SRC_DIR)/*.c)

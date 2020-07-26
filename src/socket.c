@@ -10,6 +10,8 @@
 #include <netinet/in.h>
 #include <net/if.h>
 
+#include <sys/ioctl.h>
+
 #include "socket.h"
 #include "config.h"
 
@@ -24,36 +26,40 @@ static uint8_t m_keepRunning = 1;
 static void *socket_handler(void *argument){
 	uint8_t *keep = (uint8_t *)argument;
 	struct sockaddr_in clientAddr;
-	struct sockaddr_ll destAddr;
+	struct arpreq req;
 	int addrLength, responseLength, recvBytes, sendBytes;
 	uint8_t *response;
 
 	addrLength = sizeof(clientAddr);
 	while(*keep){
-		DEBUG("Trying to receive...");
+		config_log(CONFIG_LOG_DEBUG, "Waiting for DHCP message...");
 		recvBytes = recvfrom(m_socket, payload, SOCKET_MAX_PAYLOAD, MSG_WAITALL, (struct sockaddr *)&clientAddr, &addrLength);
 		if(recvBytes > 0){
-			DEBUG("Received %d bytes", recvBytes);
+			config_log(CONFIG_LOG_DEBUG, "Received %d bytes from %d", recvBytes, inet_ntoa(clientAddr.sin_addr));
 			if(m_callback){
-       responseLength = m_callback(payload, recvBytes, &response);
+			 memset(&clientAddr, 0, sizeof(clientAddr));
+			 memset(&req, 0, sizeof(req));
+       responseLength = m_callback(payload, recvBytes, &response, &req);
      		if(responseLength > 0){
-					// memset(&clientAddr, 0, sizeof(clientAddr));
-					// clientAddr.sin_family = AF_INET;
-					// clientAddr.sin_port = htons(68);
-					// clientAddr.sin_addr.s_addr = INADDR_BROADCAST;
-					// bzero(&clientAddr.sin_zero, sizeof(clientAddr.sin_zero));
+					((struct sockaddr_in *)&req.arp_pa)->sin_port = htons(68);
 
-					memset(&destAddr, 0, sizeof(destAddr));
-					destAddr.sll_family = PF_PACKET;
-					destAddr.sll_protocol =
+					req.arp_flags |= ATF_COM;
+					strcpy(req.arp_dev, "eth0");
+					int ret = ioctl(m_socket, SIOCSARP, (caddr_t)&req);
+					if(ret < 0){
+						config_log(CONFIG_LOG_WARNING, "%s - Error adding entry at ARP table, error: %d", __func__, ret);
+						continue;
+					}
 
-					sendBytes = sendto(m_socket, response, responseLength, MSG_DONTWAIT, (struct sockaddr *)&clientAddr, addrLength);
-					DEBUG("Sent %d bytes to client...", sendBytes);
+
+					sendBytes = sendto(m_socket, response, responseLength, MSG_DONTWAIT, (struct sockaddr *)&(req.arp_pa), addrLength); //&clientAddr, addrLength);
+					config_log(CONFIG_LOG_DEBUG, "Sent %d bytes to client %s", sendBytes, inet_ntoa(((struct sockaddr_in *)&req.arp_pa)->sin_addr));
 				}
 			}
 		}
 	}
 
+	config_log(CONFIG_LOG_NORMAL, "Exiting socket thread");
 	pthread_exit(NULL);
 }
 
@@ -66,27 +72,25 @@ int socket_openServer(uint16_t port){
 	timeout.tv_sec = 0;
 	timeout.tv_usec = (SOCKET_RCVTIMEOUT_IN_MS * 1000);
 
-	m_socket = socket(AF_INET, SOCK_DGRAM, 0);
+	m_socket = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if(m_socket < 0)
 		return m_socket;
-	DEBUG("Socket created ok, with code: %d!", m_socket);
+	config_log(CONFIG_LOG_DEBUG, "Created socket for listening DHCP packets");
 
 	memset(&ifr, 0, sizeof(struct ifreq));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "eth1");
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "eth0");
 	ret = setsockopt(m_socket, SOL_SOCKET, SO_BINDTODEVICE, (void *)&ifr, sizeof(struct ifreq));
        	if(ret)
 		return ret;
-	DEBUG("Using '%s' as bound interface", ifr.ifr_name);
+	config_log(CONFIG_LOG_DEBUG, "Using '%s' as bound interface", ifr.ifr_name);
 
 	ret = setsockopt(m_socket, SOL_SOCKET, SO_BROADCAST, (void *)&broadcastFlag, sizeof(int));
 	if(ret)
 		return ret;
-	DEBUG("Enabled broadcast feature");
 
 	ret = setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, (void *)&timeout, sizeof(struct timeval));
 	if(ret)
 		return ret;
-	DEBUG("Timeout configured ok!");
 
 	memset(&m_serverAddr, 0, sizeof(m_serverAddr));
 
@@ -99,14 +103,12 @@ int socket_openServer(uint16_t port){
 		close(m_socket);
 		return ret;
 	}
-	DEBUG("Socket bound!");
 
 	ret = pthread_create(&m_socketThread, NULL, socket_handler, (void *)&m_keepRunning);
 	if(ret){
 		close(m_socket);
 		return ret;
 	}
-	DEBUG("Thread created, continue with this baby!");
 
 	// all good, let it roll
 	return 0;
@@ -114,17 +116,14 @@ int socket_openServer(uint16_t port){
 
 int socket_closeServer(void){
 	if(m_socket >= 0){
-		DEBUG("There\'s a socket to be closed...");
 		if(m_socketThread){
-			DEBUG("Closing thread PID..");
+			config_log(CONFIG_LOG_DEBUG, "Closing socket thread");
 			m_keepRunning = 0;
 			pthread_join(m_socketThread, NULL);
 		}
 
-		DEBUG("Closing socket: %d", m_socket);
 		return close(m_socket);
 	}else{
-		DEBUG("Nothing to close...go away!");
 		return 0;
 	}
 }

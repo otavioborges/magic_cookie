@@ -5,7 +5,7 @@
   "uploadOnSave": false,
   "useAtomicWrites": false,
   "deleteLocal": false,
-  "hostname": "10.10.0.100",
+  "hostname": "10.10.0.2",
   "port": "22",
   "target": "/home/barrel/magic_cookie/",
   "ignore": [
