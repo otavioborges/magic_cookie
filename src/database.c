@@ -288,7 +288,7 @@ int db_containsLease(struct in_addr ip, struct dhcp_lease *list, int count){
 	return DB_RESULTS_NONE;
 }
 
-int db_searchByIP(struct dhcp_lease *result, struct in_addr ip){
+int db_searchByIP(struct dhcp_lease *result, struct in_addr ip, uint8_t includeStatic){
 	int ret;
 	char query[128];
 
@@ -298,7 +298,11 @@ int db_searchByIP(struct dhcp_lease *result, struct in_addr ip){
 		return ret;
 	}
 
-	sprintf(query, "SELECT * FROM dhcp_releases WHERE ip_addr=%u;", ip.s_addr);
+	if(includeStatic)
+		sprintf(query, "SELECT ip_addr, hw_addr FROM dhcp_releases WHERE ip_addr=%u UNION SELECT ip_addr, hw_addr FROM dhcp_fixed WHERE ip_addr=%u;", ip.s_addr, ip.s_addr);
+	else
+		sprintf(query, "SELECT * FROM dhcp_releases WHERE ip_addr=%u;", ip.s_addr);
+
 	PGresult *res = PQexecParams(m_conn, query, 0, NULL, NULL, NULL, NULL, 1);
 	if(PQresultStatus(res) != PGRES_TUPLES_OK){
 		config_log(CONFIG_LOG_DEBUG, "No leases with IP %s", inet_ntoa(ip));
@@ -308,12 +312,18 @@ int db_searchByIP(struct dhcp_lease *result, struct in_addr ip){
 	if(PQntuples(res) == 0)
 		return DB_RESULTS_NONE;
 
-	result->ipAddr.s_addr = ntohl(*((uint32_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_IP)));
-	db_DBToHwAddr((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HW), result->hwAddr);
-	strcpy(result->hostname, (char *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HOSTNAME));
-	result->leaseTimestamp = ntohll(*((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_TIME)));
+	if(result){
+		result->ipAddr.s_addr = ntohl(*((uint32_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_IP)));
+		db_DBToHwAddr((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HW), result->hwAddr);
 
-	config_log(CONFIG_LOG_DEBUG, "Found a lease for %s with IP %s", dhcp_htoa(result->hwAddr), inet_ntoa(result->ipAddr));
+		if(!includeStatic){
+			strcpy(result->hostname, (char *)PQgetvalue(res, 0, DHCP_RELEASES_COL_HOSTNAME));
+			result->leaseTimestamp = ntohll(*((uint64_t *)PQgetvalue(res, 0, DHCP_RELEASES_COL_TIME)));
+		}
+
+		config_log(CONFIG_LOG_DEBUG, "Found %d leases for %s with IP %s", PQntuples(res), dhcp_htoa(result->hwAddr), inet_ntoa(result->ipAddr));
+	}
+
 	PQclear(res);
 	db_closeDB();
 	return DB_RESULTS_FOUND;

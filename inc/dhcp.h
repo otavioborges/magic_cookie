@@ -41,6 +41,16 @@
 #define DHCP_OPTION_AUTODISCOVERY		252U
 #define DHCP_OPTION_END							255U
 
+#define DHCP_REQ_NONE								0
+#define DHCP_REQ_DISCOVER						1
+#define DHCP_REQ_OFFER							2
+#define DHCP_REQ_REQUEST						3
+#define DHCP_REQ_DECLINE						4
+#define DHCP_REQ_ACK								5
+#define DHCP_REQ_NACK								6
+#define DHCP_REQ_RELEASE						7
+#define DHCP_REQ_INFORM							8
+
 #include <netinet/in.h>
 #include <stdint.h>
 
@@ -101,5 +111,8 @@ int dhcp_macMatch(uint8_t *a, uint8_t *b);
 int dhcp_init(char *configFile);
 int dhcp_end(void);
 char *dhcp_htoa(uint8_t *hwAddr);
+char *dhcp_strreq(uint8_t req);
+
+struct dhcp_options *dhcp_search_options(uint8_t option, uint8_t *where, int length);
 
 #endif // _INC_DHCP_H_

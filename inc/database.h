@@ -22,7 +22,7 @@ int db_removeLease(uint8_t *hwAddr);
 int db_removeStaticLease(uint8_t *hwAddr);
 
 int db_containsLease(struct in_addr ip, struct dhcp_lease *list, int count);
-int db_searchByIP(struct dhcp_lease *result, struct in_addr ip);
+int db_searchByIP(struct dhcp_lease *result, struct in_addr ip, uint8_t includeStatic);
 
 int db_updateLeaseTime(uint8_t *hw);
 int db_deleteOlderThan(uint32_t seconds);

@@ -1,11 +1,5 @@
 #define DHCP_PACKET_OVERHEAD	240
 
-#define DHCP_OP_DISCOVER			1
-#define DHCP_OP_OFFER					2
-#define DHCP_OP_REQUEST				3
-#define DHCP_OP_ACK						5
-#define DHCP_OP_NACK					6
-
 #define DHCP_PACKET_OP_REQ		1
 #define DHCP_PACKET_OP_RES		2
 
@@ -31,6 +25,7 @@
 #include "config.h"
 #include "dhcp.h"
 #include "database.h"
+#include "parser.h"
 
 static struct dhcp_options *parsed_options[128];
 static struct dhcp_server_config default_config;
@@ -38,11 +33,7 @@ static uint8_t m_keepRunning = 1;
 static pthread_t m_dhcpHandler = 0;
 static pthread_mutex_t m_dhcpWait = PTHREAD_MUTEX_INITIALIZER;
 
-static int dhcp_get_available_lease(struct in_addr *lease);
-static struct dhcp_options *dhcp_search_options(uint8_t option, uint8_t *where, int length);
-// use after lease is done!
 static struct dhcp_options *dhcp_get_option_value(uint8_t option, struct dhcp_options *op, int *opLength, int args, ...);
-static int dhcp_is_valid_ip(struct in_addr *ip);
 static void *dhcp_monitorThread(void *arguments);
 
 static uint8_t m_response[2048];
@@ -51,13 +42,12 @@ static char m_result[32];
 int dhcp_socketCallback(uint8_t *payload, int length, uint8_t **response, struct arpreq *client){
 	struct dhcp_packet *request = (struct dhcp_packet *)payload;
 	struct dhcp_packet *result  = (struct dhcp_packet *)m_response;
+	int optionsLength, responseLength, flags, reqOptLength, idx;
 	struct dhcp_options *currentOption;
-	struct dhcp_lease possibleLease, searchLease;
+	struct dhcp_lease possibleLease;
 	uint8_t *requestedOptions;
-	int idx, responseLength, optionsLength, reqOptLength, ipIsDefined;
 	uint8_t responseMessageType;
 
-	ipIsDefined = 0;
 	// copy parts of request to response
 	result->op = DHCP_PACKET_OP_RES;
 	result->htype = request->htype;
@@ -76,215 +66,131 @@ int dhcp_socketCallback(uint8_t *payload, int length, uint8_t **response, struct
 	if(request->op == DHCP_PACKET_OP_REQ){
 		// branch on DISCOVER or REQUEST
 		config_log(CONFIG_LOG_DEBUG, "Received a DHCP request");
-		optionsLength = (length - DHCP_PACKET_OVERHEAD);
 
 		if((request->htype != DHCP_PACKET_HTYPE_ETH) || (request->hlen != 6)){
 			// we don't know how to handle IPv6
+			config_log(CONFIG_LOG_WARNING, "Client has an unknown hardware address. Type: %d, length: %d", request->htype, request->hlen);
 			return 0;
 		}
 
-		// Define client HW address
-		currentOption = dhcp_search_options(DHCP_OPTION_CLIENT_ID, request->options, optionsLength);
-		if(currentOption && (currentOption->length == 7) && (currentOption->data[0] == 0x01)){
-			memcpy(possibleLease.hwAddr, (currentOption->data + 1), 6);
-		}else{
-			// we couldn't find the MAC of the client use chAddr
-			memcpy(possibleLease.hwAddr, request->chAddr, 6);
-		}
-		config_log(CONFIG_LOG_DEBUG, "Client MAC address is %s", dhcp_htoa(possibleLease.hwAddr));
-
-		currentOption = dhcp_search_options(DHCP_OPTION_HOSTNAME, request->options, optionsLength);
-		if(currentOption){
-			// client sent us a hostname
-			memcpy(possibleLease.hostname, currentOption->data, currentOption->length);
-			possibleLease.hostname[currentOption->length] = '\0'; // terminate the string
-
-			config_log(CONFIG_LOG_DEBUG, "Client hostname is '%s'", possibleLease.hostname);
-		}else{
-			// no hostname
-			possibleLease.hostname[0] = '\0';
-		}
-
-		// no IP available, sorry, no apples for you!
 		client->arp_flags = 0;
-		currentOption = dhcp_search_options(DHCP_OPTION_OP, request->options, optionsLength);
-		if(currentOption && (currentOption->data[0] == DHCP_OP_DISCOVER)){
-			// discover, let's find an IP for you buddy
-			if(db_searchStaticLease(&possibleLease, possibleLease.hwAddr) == DB_RESULTS_FOUND){
-				config_log(CONFIG_LOG_NORMAL, "Found a static lease with IP %s", possibleLease.ipAddr);
-				ipIsDefined = 1;
-			}
-
-			// check if we have a older lease for this client
-			// TODO: renew and check lease time
-			if(db_searchLease(&possibleLease, possibleLease.hwAddr) == DB_RESULTS_FOUND){
-				config_log(CONFIG_LOG_NORMAL, "Found a old lease for %s with IP %s", dhcp_htoa(possibleLease.hwAddr), inet_ntoa(possibleLease.ipAddr));
-				ipIsDefined = 1;
-			}
-
-			if(!ipIsDefined){
-				// let's get a IP
-				if(dhcp_get_available_lease(&(possibleLease.ipAddr)))
-					ipIsDefined = 1;
-				else
-					ipIsDefined = 0;
-			}
-
-			if(!ipIsDefined){ // no IP , shhhh, say nothing
-				config_log(CONFIG_LOG_WARNING, "No available leases for %s", dhcp_htoa(possibleLease.hwAddr));
-				return 0;
-			}else{
-				config_log(CONFIG_LOG_NORMAL, "Found a new IP %s for %s", inet_ntoa(possibleLease.ipAddr), dhcp_htoa(possibleLease.hwAddr));
-				responseMessageType = DHCP_OP_OFFER;
-			}
-		}else if(currentOption && (currentOption->data[0] == DHCP_OP_REQUEST)){
-			// check if client is asking for an IP and if it's valid
-			currentOption = dhcp_search_options(DHCP_OPTION_REQ, request->options, optionsLength);
-			if(currentOption && !ipIsDefined){
-				if(dhcp_is_valid_ip(((struct in_addr *)currentOption->data))){
-					if(db_searchByIP(&searchLease, *((struct in_addr *)currentOption->data)) == DB_RESULTS_FOUND){
-						if(dhcp_macMatch(searchLease.hwAddr, possibleLease.hwAddr)){
-							memcpy(&possibleLease, &searchLease, sizeof(struct dhcp_lease));
-							ipIsDefined = 1;
-						}
-					}else{
-						possibleLease.ipAddr = *((struct in_addr *)currentOption->data);
-						ipIsDefined = 1;
-					}
-				}
-			}else{
-				if(request->cIAddr.s_addr){
-					if(dhcp_is_valid_ip(&request->cIAddr)){
-						if(db_searchByIP(&searchLease, request->cIAddr) == DB_RESULTS_FOUND){
-							if(dhcp_macMatch(searchLease.hwAddr, possibleLease.hwAddr)){
-								memcpy(&possibleLease, &searchLease, sizeof(struct dhcp_lease));
-								ipIsDefined = 1;
-							}
-						}
-					}
-				}
-			}
-
-			if(!ipIsDefined){ // no IP return a NACK
-				config_log(CONFIG_LOG_WARNING, "Sending a NACK for %s, requesting for IP %s", dhcp_htoa(possibleLease.hwAddr), inet_ntoa(possibleLease.ipAddr));
-				responseMessageType = DHCP_OP_NACK;
-			}else{
-				config_log(CONFIG_LOG_NORMAL, "Confirming IP %s for %s", inet_ntoa(possibleLease.ipAddr), dhcp_htoa(possibleLease.hwAddr));
-				responseMessageType = DHCP_OP_ACK;
-				// add this sucker to the lease table
-				db_addLease(&possibleLease);
+		optionsLength = (length - DHCP_PACKET_OVERHEAD);
+		responseMessageType = parser_manageLease(&possibleLease, request, default_config, optionsLength);
+		if(responseMessageType != DHCP_REQ_NONE){
+			if(responseMessageType == DHCP_REQ_ACK)
 				client->arp_flags = ATF_PERM;
-			}
-		}else{
-			config_log(CONFIG_LOG_WARNING, "Unknown DHCP request, ID: %d", currentOption->data[0]);
-			return 0; // we don't know what you're doing
-		}
 
-		// parse the options to the return packet
-		result->yIAddr.s_addr = possibleLease.ipAddr.s_addr;
-		responseLength = DHCP_PACKET_OVERHEAD;
+			config_log(CONFIG_LOG_NORMAL, "Replying client %s with type '%s', client IP is %s", dhcp_htoa(possibleLease.hwAddr), dhcp_strreq(responseMessageType),
+				inet_ntoa(possibleLease.ipAddr));
 
-		// check for options we will send
-		currentOption = dhcp_search_options(DHCP_OPTION_PARAMS, request->options, optionsLength);
-		if(currentOption){
-			requestedOptions = currentOption->data;
-			reqOptLength = currentOption->length;
+			// parse the options to the return packet
+			result->yIAddr.s_addr = possibleLease.ipAddr.s_addr;
+			responseLength = DHCP_PACKET_OVERHEAD;
 
 			currentOption = (struct dhcp_options *)result->options;
 			currentOption = dhcp_get_option_value(DHCP_OPTION_OP, currentOption, &optionsLength, 1, responseMessageType);
 			responseLength += optionsLength;
 
-			ipIsDefined = 0; // let's use this variable again! SO? GOT PROBLEM?
-			for(idx = 0; idx < reqOptLength; idx++){
-				switch(requestedOptions[idx]){
-					case DHCP_OPTION_HOSTNAME:
-						currentOption = dhcp_get_option_value(DHCP_OPTION_HOSTNAME, currentOption, &optionsLength, 1, possibleLease.hostname);
-						break;
-					case DHCP_OPTION_REQ:
-						currentOption = dhcp_get_option_value(DHCP_OPTION_REQ, currentOption, &optionsLength, 1, &possibleLease.ipAddr);
-						break;
-					case DHCP_OPTION_DEFAULT_TTL:
-						ipIsDefined |= DHCP_OPT_MAND_TTL;
-					case DHCP_OPTION_LEASE_TIME:
-						ipIsDefined |= DHCP_OPT_MAND_LEASE_TIME;
-					case DHCP_OPTION_RENEWAL:
-						ipIsDefined |= DHCP_OPT_MAND_RENEWAL;
-					case DHCP_OPTION_REBINDING:
-						ipIsDefined |= DHCP_OPT_MAND_REBINDING;
-					default:
-						currentOption = dhcp_get_option_value(requestedOptions[idx], currentOption, &optionsLength, 0);
-				}
-				responseLength += optionsLength;
-			}
+			optionsLength = (length - DHCP_PACKET_OVERHEAD);
+			currentOption = dhcp_search_options(DHCP_OPTION_PARAMS, request->options, optionsLength);
+			if(currentOption){
+				requestedOptions = currentOption->data;
+				reqOptLength = currentOption->length;
 
-			if(!(ipIsDefined & DHCP_OPT_MAND_TTL)){
-				currentOption = dhcp_get_option_value(DHCP_OPTION_DEFAULT_TTL, currentOption, &optionsLength, 0);
+				flags = 0; // let's use this variable again! SO? GOT PROBLEM?
+				for(idx = 0; idx < reqOptLength; idx++){
+					switch(requestedOptions[idx]){
+						case DHCP_OPTION_HOSTNAME:
+							currentOption = dhcp_get_option_value(DHCP_OPTION_HOSTNAME, currentOption, &optionsLength, 1, possibleLease.hostname);
+							break;
+						case DHCP_OPTION_REQ:
+							currentOption = dhcp_get_option_value(DHCP_OPTION_REQ, currentOption, &optionsLength, 1, &possibleLease.ipAddr);
+							break;
+						case DHCP_OPTION_DEFAULT_TTL:
+							flags |= DHCP_OPT_MAND_TTL;
+						case DHCP_OPTION_LEASE_TIME:
+							flags |= DHCP_OPT_MAND_LEASE_TIME;
+						case DHCP_OPTION_RENEWAL:
+							flags |= DHCP_OPT_MAND_RENEWAL;
+						case DHCP_OPTION_REBINDING:
+							flags |= DHCP_OPT_MAND_REBINDING;
+						default:
+							currentOption = dhcp_get_option_value(requestedOptions[idx], currentOption, &optionsLength, 0);
+					}
+					responseLength += optionsLength;
+				}
+
+				if(!(flags & DHCP_OPT_MAND_TTL)){
+					currentOption = dhcp_get_option_value(DHCP_OPTION_DEFAULT_TTL, currentOption, &optionsLength, 0);
+					responseLength += optionsLength;
+				}
+				if(!(flags & DHCP_OPT_MAND_LEASE_TIME)){
+					currentOption = dhcp_get_option_value(DHCP_OPTION_LEASE_TIME, currentOption, &optionsLength, 0);
+					responseLength += optionsLength;
+				}
+				if(!(flags & DHCP_OPT_MAND_RENEWAL)){
+					currentOption = dhcp_get_option_value(DHCP_OPTION_RENEWAL, currentOption, &optionsLength, 0);
+					responseLength += optionsLength;
+				}
+				if(!(flags & DHCP_OPT_MAND_REBINDING)){
+					currentOption = dhcp_get_option_value(DHCP_OPTION_REBINDING, currentOption, &optionsLength, 0);
+					responseLength += optionsLength;
+				}
+			}else{ // DHCP_OPTION_PARAMS is not defined!
+				// send the default configs
+				currentOption = (struct dhcp_options *)result->options;
+
+				currentOption = dhcp_get_option_value(DHCP_OPTION_OP, currentOption, &optionsLength, 1, responseMessageType);
 				responseLength += optionsLength;
-			}
-			if(!(ipIsDefined & DHCP_OPT_MAND_LEASE_TIME)){
+
+				currentOption = dhcp_get_option_value(DHCP_OPTION_HOSTNAME, currentOption, &optionsLength, 1, possibleLease.hostname);
+				responseLength += optionsLength;
+
+				currentOption = dhcp_get_option_value(DHCP_OPTION_SUBNET_MASK, currentOption, &optionsLength, 0);
+				responseLength += optionsLength;
+
+				currentOption = dhcp_get_option_value(DHCP_OPTION_ROUTER, currentOption, &optionsLength, 0);
+				responseLength += optionsLength;
+
 				currentOption = dhcp_get_option_value(DHCP_OPTION_LEASE_TIME, currentOption, &optionsLength, 0);
 				responseLength += optionsLength;
-			}
-			if(!(ipIsDefined & DHCP_OPT_MAND_RENEWAL)){
+
+				currentOption = dhcp_get_option_value(DHCP_OPTION_SERVER_ID, currentOption, &optionsLength, 0);
+				responseLength += optionsLength;
+
+				currentOption = dhcp_get_option_value(DHCP_OPTION_DNS_SERVER, currentOption, &optionsLength, 0);
+				responseLength += optionsLength;
+
+				currentOption = dhcp_get_option_value(DHCP_OPTION_DEFAULT_TTL, currentOption, &optionsLength, 0);
+				responseLength += optionsLength;
+
 				currentOption = dhcp_get_option_value(DHCP_OPTION_RENEWAL, currentOption, &optionsLength, 0);
 				responseLength += optionsLength;
-			}
-			if(!(ipIsDefined & DHCP_OPT_MAND_REBINDING)){
+
 				currentOption = dhcp_get_option_value(DHCP_OPTION_REBINDING, currentOption, &optionsLength, 0);
 				responseLength += optionsLength;
 			}
-		}else{
-			// send the default configs
-			currentOption = (struct dhcp_options *)result->options;
 
-			currentOption = dhcp_get_option_value(DHCP_OPTION_OP, currentOption, &optionsLength, 1, responseMessageType);
-			responseLength += optionsLength;
+			// terminate the options
+			currentOption->op = DHCP_OPTION_END;
+			responseLength++;
 
-			currentOption = dhcp_get_option_value(DHCP_OPTION_HOSTNAME, currentOption, &optionsLength, 1, possibleLease.hostname);
-			responseLength += optionsLength;
+			struct sockaddr_in *si;
+			si = (struct sockaddr_in *)&(client->arp_pa);
+			si->sin_family = AF_INET;
+			si->sin_addr.s_addr = result->yIAddr.s_addr;
+			client->arp_ha.sa_family = ARPHRD_ETHER;
+			memcpy(client->arp_ha.sa_data, possibleLease.hwAddr, 6);
 
-			currentOption = dhcp_get_option_value(DHCP_OPTION_SUBNET_MASK, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
-
-			currentOption = dhcp_get_option_value(DHCP_OPTION_ROUTER, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
-
-			currentOption = dhcp_get_option_value(DHCP_OPTION_LEASE_TIME, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
-
-			currentOption = dhcp_get_option_value(DHCP_OPTION_SERVER_ID, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
-
-			currentOption = dhcp_get_option_value(DHCP_OPTION_DNS_SERVER, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
-
-			currentOption = dhcp_get_option_value(DHCP_OPTION_DEFAULT_TTL, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
-
-			currentOption = dhcp_get_option_value(DHCP_OPTION_RENEWAL, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
-
-			currentOption = dhcp_get_option_value(DHCP_OPTION_REBINDING, currentOption, &optionsLength, 0);
-			responseLength += optionsLength;
+			*response = m_response;
+			return responseLength;
+		}else{ // parser didn't send a DHCP requisition code
+			return 0; // parser could not handle the request, reply nothing
 		}
-
-		// terminate the options
-		currentOption->op = DHCP_OPTION_END;
-		responseLength++;
-
-		struct sockaddr_in *si;
-		si = (struct sockaddr_in *)&(client->arp_pa);
-		si->sin_family = AF_INET;
-		si->sin_addr.s_addr = result->yIAddr.s_addr;
-		client->arp_ha.sa_family = ARPHRD_ETHER;
-		memcpy(client->arp_ha.sa_data, possibleLease.hwAddr, 6);
-
-		*response = m_response;
-		return responseLength;
-	}else{
-		// we only respond to requests
-		return 0;
 	}
+
+	// not a request, we only serve
+	return 0;
 }
 
 int dhcp_macMatch(uint8_t *a, uint8_t *b){
@@ -335,37 +241,41 @@ char *dhcp_htoa(uint8_t *hwAddr){
 	return m_result;
 }
 
-static int dhcp_get_available_lease(struct in_addr *lease){
-	uint32_t nextLease = default_config.initialRange;
-	struct in_addr invertMask = {.s_addr = ~(default_config.netmask.s_addr)};
-	struct dhcp_lease *currentLeases;
-	struct dhcp_lease *staticLeases;
-	int lCount, sCount, isFree;
-
-	currentLeases = db_getLeases(&lCount);
-	staticLeases = db_getStaticLeases(&sCount);
-
-	// this may not be reach if the MAC has a static lease
-	do{
-		if(nextLease > default_config.endRange)
-			return 0;
-
-		lease->s_addr = (ntohl(nextLease) & invertMask.s_addr) | default_config.subnet.s_addr;
-		isFree = db_containsLease(*lease, currentLeases, lCount);
-		if(isFree == DB_RESULTS_FOUND){
-			nextLease++;
-			continue;
-		}
-
-		isFree = db_containsLease(*lease, staticLeases, sCount);
-		nextLease++;
-	}while(isFree == DB_RESULTS_FOUND);
-
-	// next lease is found and free
-	return 1;
+char *dhcp_strreq(uint8_t req){
+	switch(req){
+		case DHCP_REQ_NONE:
+			strcpy(m_result, "NONE");
+			break;
+		case DHCP_REQ_DISCOVER:
+			strcpy(m_result, "DISCOVER");
+			break;
+		case DHCP_REQ_OFFER:
+			strcpy(m_result, "OFFER");
+			break;
+		case DHCP_REQ_REQUEST:
+			strcpy(m_result, "REQUEST");
+			break;
+		case DHCP_REQ_DECLINE:
+			strcpy(m_result, "DECLINE");
+			break;
+		case DHCP_REQ_ACK:
+			strcpy(m_result, "ACK");
+			break;
+		case DHCP_REQ_NACK:
+			strcpy(m_result, "NACK");
+			break;
+		case DHCP_REQ_RELEASE:
+			strcpy(m_result, "RELEASE");
+			break;
+		case DHCP_REQ_INFORM:
+			strcpy(m_result, "INFORM");
+			break;
+		default:
+			strcpy(m_result, "UNKNOWN");
+	}
 }
 
-static struct dhcp_options *dhcp_search_options(uint8_t option, uint8_t *where, int length){
+struct dhcp_options *dhcp_search_options(uint8_t option, uint8_t *where, int length){
 	struct dhcp_options *currentOp = (struct dhcp_options *)where;
 
 	while(currentOp->op != 0xFF){
@@ -513,13 +423,6 @@ static struct dhcp_options *dhcp_get_option_value(uint8_t option, struct dhcp_op
 	}
 
 	return op;
-}
-
-static int dhcp_is_valid_ip(struct in_addr *ip){
-	if((ip->s_addr & default_config.netmask.s_addr) == (default_config.subnet.s_addr & default_config.netmask.s_addr))
-		return 1;	// this IP is within the subnet
-	else
-		return 0;
 }
 
 static void *dhcp_monitorThread(void *arguments){

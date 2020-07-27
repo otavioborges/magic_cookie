@@ -44,7 +44,7 @@ static void *socket_handler(void *argument){
 					((struct sockaddr_in *)&req.arp_pa)->sin_port = htons(68);
 
 					req.arp_flags |= ATF_COM;
-					strcpy(req.arp_dev, "eth0");
+					strcpy(req.arp_dev, "eth1");
 					int ret = ioctl(m_socket, SIOCSARP, (caddr_t)&req);
 					if(ret < 0){
 						config_log(CONFIG_LOG_WARNING, "%s - Error adding entry at ARP table, error: %d", __func__, ret);
@@ -78,7 +78,7 @@ int socket_openServer(uint16_t port){
 	config_log(CONFIG_LOG_DEBUG, "Created socket for listening DHCP packets");
 
 	memset(&ifr, 0, sizeof(struct ifreq));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "eth0");
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "eth1");
 	ret = setsockopt(m_socket, SOL_SOCKET, SO_BINDTODEVICE, (void *)&ifr, sizeof(struct ifreq));
        	if(ret)
 		return ret;

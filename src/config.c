@@ -55,7 +55,7 @@ int config_loadFromFile(char *path, struct dhcp_server_config *config){
     fclose(configFile);
   }
 */
-  config->interface = "eth0";
+  config->interface = "eth1";
 
   config->routers = (struct in_addr *)malloc((sizeof(struct in_addr) * 2));
 	config->dns = (struct in_addr *)malloc((sizeof(struct in_addr) * 2));
